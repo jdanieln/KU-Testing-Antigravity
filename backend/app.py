@@ -124,5 +124,40 @@ def health_check():
 def admin_dashboard():
     return jsonify({'message': 'Welcome Super Admin', 'data': 'Secret Data'})
 
+@app.route('/api/admin/users', methods=['GET'])
+@verify_token
+@role_required(['SUPER_ADMIN'])
+def list_users():
+    """List all users for management."""
+    users_ref = db.collection('users')
+    docs = users_ref.stream()
+    
+    users = []
+    for doc in docs:
+        user = doc.to_dict()
+        user['uid'] = doc.id
+        users.append(user)
+        
+    return jsonify(users)
+
+@app.route('/api/admin/users/<uid>/role', methods=['PUT'])
+@verify_token
+@role_required(['SUPER_ADMIN'])
+def update_user_role(uid):
+    """Update a user's role."""
+    new_role = request.json.get('role')
+    ALLOWED_ROLES = ['SUPER_ADMIN', 'DOCTOR', 'ASSISTANT', 'PATIENT']
+    
+    if new_role not in ALLOWED_ROLES:
+        return jsonify({'error': 'Invalid role', 'allowed': ALLOWED_ROLES}), 400
+        
+    user_ref = db.collection('users').document(uid)
+    if not user_ref.get().exists:
+        return jsonify({'error': 'User not found'}), 404
+        
+    user_ref.update({'role': new_role})
+    return jsonify({'message': f'User role updated to {new_role}'})
+
+
 if __name__ == '__main__':
     app.run(debug=True, port=5000)

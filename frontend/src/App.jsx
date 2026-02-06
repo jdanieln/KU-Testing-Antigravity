@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import { BrowserRouter as Router, Routes, Route, Link } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
@@ -41,7 +42,111 @@ function Home() {
 
 function PatientHistory() { return <h1 className="p-8 text-2xl">Patient Medical History</h1> }
 function DoctorDiagnoses() { return <h1 className="p-8 text-2xl">Doctor Diagnoses Panel</h1> }
-function AdminDashboard() { return <h1 className="p-8 text-2xl">Super Admin Dashboard</h1> }
+function AdminDashboard() {
+  const [users, setUsers] = useState([]);
+  const { currentUser } = useAuth();
+
+  useEffect(() => {
+    fetchUsers();
+  }, []);
+
+  const fetchUsers = async () => {
+    if (!currentUser) return;
+    const token = await currentUser.getIdToken();
+    try {
+      const res = await fetch('http://127.0.0.1:5000/api/admin/users', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setUsers(data);
+      }
+    } catch (err) {
+      console.error("Failed to fetch users", err);
+    }
+  };
+
+  const handleRoleChange = async (uid, newRole) => {
+    if (!currentUser) return;
+    const token = await currentUser.getIdToken();
+    try {
+      const res = await fetch(`http://127.0.0.1:5000/api/admin/users/${uid}/role`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ role: newRole })
+      });
+      if (res.ok) {
+        alert("Role updated!");
+        fetchUsers(); // Refresh list
+      } else {
+        alert("Failed to update role");
+      }
+    } catch (err) {
+      console.error("Error updating role", err);
+    }
+  };
+
+  return (
+    <div className="p-8 bg-gray-50 min-h-screen">
+      <div className="max-w-6xl mx-auto">
+        <div className="flex justify-between items-center mb-6">
+          <h1 className="text-3xl font-bold text-gray-800">Admin Dashboard</h1>
+          <Link to="/" className="text-blue-600 hover:underline">Back to Home</Link>
+        </div>
+
+        <div className="bg-white rounded-lg shadow overflow-hidden">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">User</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Current Role</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {users.map(user => (
+                <tr key={user.uid}>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <div className="text-sm font-medium text-gray-900">{user.displayName || 'No Name'}</div>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <div className="text-sm text-gray-500">{user.email}</div>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full 
+                                            ${user.role === 'SUPER_ADMIN' ? 'bg-purple-100 text-purple-800' :
+                        user.role === 'DOCTOR' ? 'bg-green-100 text-green-800' :
+                          user.role === 'ASSISTANT' ? 'bg-yellow-100 text-yellow-800' :
+                            'bg-gray-100 text-gray-800'}`}>
+                      {user.role}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                    <select
+                      value={user.role}
+                      onChange={(e) => handleRoleChange(user.uid, e.target.value)}
+                      className="mt-1 block w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                    >
+                      <option value="Same" disabled>Change Role...</option>
+                      <option value="PATIENT">PATIENT</option>
+                      <option value="DOCTOR">DOCTOR</option>
+                      <option value="ASSISTANT">ASSISTANT</option>
+                      <option value="SUPER_ADMIN">SUPER_ADMIN</option>
+                    </select>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function App() {
   return (
