@@ -11,7 +11,9 @@ load_dotenv()
 
 app = Flask(__name__)
 # Enable CORS for all routes, but ideally restrict to frontend origin in production
-CORS(app)
+# Enable CORS for all routes
+# explicit configuration to ensure Authorization header and frontend origin are allowed
+CORS(app, resources={r"/api/*": {"origins": ["http://localhost:5173", "http://127.0.0.1:5173"]}}, supports_credentials=True)
 
 # Initialize Firebase Admin SDK
 cred_path = os.getenv('FIREBASE_CREDENTIALS', 'serviceAccountKey.json')
@@ -160,4 +162,4 @@ def update_user_role(uid):
 
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=5001)
