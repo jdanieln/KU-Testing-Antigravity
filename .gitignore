@@ -9,3 +9,9 @@
 
 # OS
 Thumbs.db
+
+# Environment and Logs
+.env
+.env.*
+!.env.example
+*.log

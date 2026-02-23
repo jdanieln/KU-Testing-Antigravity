@@ -33,7 +33,8 @@ export function AuthProvider({ children }) {
                 // Sync user with backend and get role
                 try {
                     const token = await user.getIdToken();
-                    const response = await fetch('http://127.0.0.1:5001/api/auth/sync', {
+                    console.log(import.meta.env.VITE_API_URL, "API URL");
+                    const response = await fetch(`${import.meta.env.VITE_API_URL}/api/auth/sync`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
@@ -43,6 +44,7 @@ export function AuthProvider({ children }) {
 
                     if (response.ok) {
                         const data = await response.json();
+                        console.log("DEBUG: Role fetched:", data.role);
                         setUserRole(data.role);
                     } else {
                         console.error("Failed to sync user role");
@@ -51,6 +53,7 @@ export function AuthProvider({ children }) {
                     }
                 } catch (error) {
                     console.error("Error fetching user role:", error);
+                    alert(`Error syncing role: ${error.message}`);
                     setUserRole('PATIENT');
                 }
             } else {

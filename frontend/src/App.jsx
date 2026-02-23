@@ -54,7 +54,7 @@ function AdminDashboard() {
     if (!currentUser) return;
     const token = await currentUser.getIdToken();
     try {
-      const res = await fetch('http://127.0.0.1:5000/api/admin/users', {
+      const res = await fetch(`${import.meta.env.VITE_API_URL}/api/admin/users`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (res.ok) {
@@ -70,7 +70,7 @@ function AdminDashboard() {
     if (!currentUser) return;
     const token = await currentUser.getIdToken();
     try {
-      const res = await fetch(`http://127.0.0.1:5000/api/admin/users/${uid}/role`, {
+      const res = await fetch(`${import.meta.env.VITE_API_URL}/api/admin/users/${uid}/role`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',

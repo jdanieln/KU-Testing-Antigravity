@@ -6,14 +6,15 @@ import firebase_admin
 from firebase_admin import credentials, firestore, auth, storage
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from the project root
+dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+load_dotenv(dotenv_path)
 
 app = Flask(__name__)
 # Enable CORS for all routes, but ideally restrict to frontend origin in production
 # Enable CORS for all routes
 # explicit configuration to ensure Authorization header and frontend origin are allowed
-CORS(app, resources={r"/api/*": {"origins": ["http://localhost:5173", "http://127.0.0.1:5173"]}}, supports_credentials=True)
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # Initialize Firebase Admin SDK
 cred_path = os.getenv('FIREBASE_CREDENTIALS', 'serviceAccountKey.json')
@@ -31,9 +32,30 @@ if not firebase_admin._apps:
         db = None
 
 # --- Middleware ---
+
+@app.before_request
+def log_request_info():
+    print(f"DEBUG: Request {request.method} {request.path}")
+    print(f"DEBUG: Headers: {request.headers}")
+    # Be careful not to print full body if large, but for auth debugging it helps
+    try:
+        if request.is_json:
+            print(f"DEBUG: Body: {request.json}")
+        else:
+             print(f"DEBUG: Body (Raw): {request.get_data(as_text=True)}")
+    except Exception as e:
+        print(f"DEBUG: Error reading body: {e}")
+
+@app.after_request
+def log_response_info(response):
+    print(f"DEBUG: Response Status: {response.status}")
+    print(f"DEBUG: Response Headers: {response.headers}")
+    return response
+
 def verify_token(f):
     @functools.wraps(f)
     def decorated_function(*args, **kwargs):
+        print("DEBUG: verify_token decorator called")
         if not db:
              # If DB not connected, mock auth for development ONLY if needed, or fail.
              # Failing is safer.
@@ -41,6 +63,7 @@ def verify_token(f):
 
         auth_header = request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
+            print("DEBUG: verify_token - Missing or invalid Authorization header")
             return jsonify({'error': 'Unauthorized', 'message': 'Missing Token'}), 401
         
         token = auth_header.split(' ')[1]
@@ -56,9 +79,11 @@ def verify_token(f):
             if user_doc.exists:
                 g.user = user_doc.to_dict()
                 g.user['uid'] = uid
+                print(f"DEBUG: verify_token - User found in Firestore. Role: {g.user.get('role')}")
             else:
                 # User authenticated with Google but not in our DB yet (First login sync pending)
                 # Or could treat as "Guest"
+                print(f"DEBUG: verify_token - User {uid} NOT found in Firestore.")
                 g.user = {'uid': uid, 'role': 'GUEST'}
                 
             return f(*args, **kwargs)
@@ -74,6 +99,7 @@ def role_required(allowed_roles):
         def decorated_function(*args, **kwargs):
             user_role = g.user.get('role')
             if user_role not in allowed_roles:
+                 print(f"DEBUG: role_required - Access denied. User role: {user_role}, Allowed: {allowed_roles}")
                  return jsonify({'error': 'Forbidden', 'message': 'Insufficient Permissions'}), 403
             return f(*args, **kwargs)
         return decorated_function
@@ -92,12 +118,15 @@ def sync_user():
     uid = g.user['uid']
     user_data = g.user
     
+    print(f"DEBUG: sync_user called for UID: {uid}")
+    
     # Check if user actually exists in DB (verify_token might populate g.user as GUEST if not found)
     user_ref = db.collection('users').document(uid)
     doc = user_ref.get()
     
     if not doc.exists:
         # Create new user
+        print(f"DEBUG: sync_user - Creating new user for {uid}")
         new_user = {
             'email': request.json.get('email', ''), # Frontend should send this or we extract from token if possible
             'displayName': request.json.get('displayName', ''),
@@ -110,7 +139,9 @@ def sync_user():
         user_ref.set(new_user)
         return jsonify({'message': 'User created', 'role': 'PATIENT'})
     else:
-        return jsonify({'message': 'User synced', 'role': user_data.get('role')})
+        current_role = user_data.get('role')
+        print(f"DEBUG: sync_user - User exists. Returning role: {current_role}")
+        return jsonify({'message': 'User synced', 'role': current_role})
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
@@ -162,4 +193,5 @@ def update_user_role(uid):
 
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5001)
+    port = int(os.getenv('API_PORT', 5005))
+    app.run(debug=True, port=port)
