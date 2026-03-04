@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { BrowserRouter as Router, Routes, Route, Link } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
@@ -46,11 +46,7 @@ function AdminDashboard() {
   const [users, setUsers] = useState([]);
   const { currentUser } = useAuth();
 
-  useEffect(() => {
-    fetchUsers();
-  }, []);
-
-  const fetchUsers = async () => {
+  const fetchUsers = useCallback(async () => {
     if (!currentUser) return;
     const token = await currentUser.getIdToken();
     try {
@@ -64,7 +60,11 @@ function AdminDashboard() {
     } catch (err) {
       console.error("Failed to fetch users", err);
     }
-  };
+  }, [currentUser]);
+
+  useEffect(() => {
+    fetchUsers();
+  }, [fetchUsers]);
 
   const handleRoleChange = async (uid, newRole) => {
     if (!currentUser) return;

@@ -1,7 +1,7 @@
 import os
 import functools
 from flask import Flask, jsonify, request, g
-from flask_cors import CORS
+
 import firebase_admin
 from firebase_admin import credentials, firestore, auth, storage
 from dotenv import load_dotenv
@@ -11,51 +11,75 @@ dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
 load_dotenv(dotenv_path)
 
 app = Flask(__name__)
-# Enable CORS for all routes, but ideally restrict to frontend origin in production
-# Enable CORS for all routes
-# explicit configuration to ensure Authorization header and frontend origin are allowed
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+# Manual CORS Handling since flask-cors is hanging on OPTIONS
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get('Origin')
+    if origin in ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5174"]:
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, Access-Control-Allow-Credentials'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    return response
+
+@app.route('/api/<path:path>', methods=['OPTIONS'])
+def handle_options(path):
+    return jsonify({}), 200
 
 # Initialize Firebase Admin SDK
 cred_path = os.getenv('FIREBASE_CREDENTIALS', 'serviceAccountKey.json')
 
 if not firebase_admin._apps:
-    if os.path.exists(cred_path):
+    if os.getenv('FIREBASE_PRIVATE_KEY'):
+        # Fix actual literal '\n' sequences from dotenv string
+        private_key = os.getenv('FIREBASE_PRIVATE_KEY').replace('\\n', '\n')
+        
+        cred_dict = {
+            "type": os.getenv('FIREBASE_TYPE', 'service_account'),
+            "project_id": os.getenv('FIREBASE_PROJECT_ID'),
+            "private_key_id": os.getenv('FIREBASE_PRIVATE_KEY_ID'),
+            "private_key": private_key,
+            "client_email": os.getenv('FIREBASE_CLIENT_EMAIL'),
+            "client_id": os.getenv('FIREBASE_CLIENT_ID'),
+            "auth_uri": os.getenv('FIREBASE_AUTH_URI', 'https://accounts.google.com/o/oauth2/auth'),
+            "token_uri": os.getenv('FIREBASE_TOKEN_URI', 'https://oauth2.googleapis.com/token'),
+            "auth_provider_x509_cert_url": os.getenv('FIREBASE_AUTH_PROVIDER_X509_CERT_URL', 'https://www.googleapis.com/oauth2/v1/certs'),
+            "client_x509_cert_url": os.getenv('FIREBASE_CLIENT_X509_CERT_URL'),
+            "universe_domain": os.getenv('FIREBASE_UNIVERSE_DOMAIN', 'googleapis.com')
+        }
+        cred = credentials.Certificate(cred_dict)
+        firebase_admin.initialize_app(cred, {
+            'storageBucket': os.getenv('FIREBASE_STORAGE_BUCKET', 'your-project-id.appspot.com')
+        })
+        print("Firebase Admin Initialized from environment variables")
+        db = firestore.client()
+    elif os.path.exists(cred_path):
         cred = credentials.Certificate(cred_path)
         firebase_admin.initialize_app(cred, {
             'storageBucket': os.getenv('FIREBASE_STORAGE_BUCKET', 'your-project-id.appspot.com')
         })
-        print("Firebase Admin Initialized")
+        print(f"Firebase Admin Initialized from file: {cred_path}")
         db = firestore.client()
     else:
-        print(f"Warning: Firebase credentials not found at {cred_path}. Firebase features will not work.")
+        print(f"Warning: Firebase credentials not found at {cred_path} or in env vars. Firebase features will not work.")
         db = None
 
 # --- Middleware ---
 
-@app.before_request
-def log_request_info():
-    print(f"DEBUG: Request {request.method} {request.path}")
-    print(f"DEBUG: Headers: {request.headers}")
-    # Be careful not to print full body if large, but for auth debugging it helps
-    try:
-        if request.is_json:
-            print(f"DEBUG: Body: {request.json}")
-        else:
-             print(f"DEBUG: Body (Raw): {request.get_data(as_text=True)}")
-    except Exception as e:
-        print(f"DEBUG: Error reading body: {e}")
 
-@app.after_request
-def log_response_info(response):
-    print(f"DEBUG: Response Status: {response.status}")
-    print(f"DEBUG: Response Headers: {response.headers}")
-    return response
+
+
 
 def verify_token(f):
     @functools.wraps(f)
     def decorated_function(*args, **kwargs):
         print("DEBUG: verify_token decorator called")
+        
+        # Preflight OPTIONS requests don't have the Authorization header
+        # Let Flask-CORS handle them or return 200 OK
+        if request.method == 'OPTIONS':
+            return jsonify({}), 200
+
         if not db:
              # If DB not connected, mock auth for development ONLY if needed, or fail.
              # Failing is safer.
@@ -107,7 +131,7 @@ def role_required(allowed_roles):
 
 # --- Endpoints ---
 
-@app.route('/api/auth/sync', methods=['POST'])
+@app.route('/api/auth/sync', methods=['POST', 'OPTIONS'])
 @verify_token
 def sync_user():
     """
@@ -194,4 +218,4 @@ def update_user_role(uid):
 
 if __name__ == '__main__':
     port = int(os.getenv('API_PORT', 5005))
-    app.run(debug=True, port=port)
+    app.run(debug=False, port=port)
