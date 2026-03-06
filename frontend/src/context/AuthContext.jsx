@@ -40,7 +40,11 @@ export function AuthProvider({ children }) {
                         headers: {
                             'Content-Type': 'application/json',
                             'Authorization': `Bearer ${token}`
-                        }
+                        },
+                        body: JSON.stringify({
+                            email: user.email,
+                            displayName: user.displayName
+                        })
                     });
 
                     if (response.ok) {

@@ -104,11 +104,23 @@ def verify_token(f):
                 g.user = user_doc.to_dict()
                 g.user['uid'] = uid
                 print(f"DEBUG: verify_token - User found in Firestore. Role: {g.user.get('role')}")
-            else:
-                # User authenticated with Google but not in our DB yet (First login sync pending)
-                # Or could treat as "Guest"
-                print(f"DEBUG: verify_token - User {uid} NOT found in Firestore.")
-                g.user = {'uid': uid, 'role': 'GUEST'}
+                # Fallback: check if doc exists by email (Admin created user but with different Auth UID)
+                req_json = request.get_json(silent=True) or {}
+                email_to_check = req_json.get('email')
+                if email_to_check:
+                    users_by_email = db.collection('users').where('email', '==', email_to_check).limit(1).get()
+                    if users_by_email:
+                        matched_doc = users_by_email[0]
+                        g.user = matched_doc.to_dict()
+                        g.user['uid'] = uid # Keep the token's UID
+                        g.user['original_uid'] = matched_doc.id # Keep a reference to merge later
+                        print(f"DEBUG: verify_token - User found by EMAIL. Role: {g.user.get('role')}")
+                    else:
+                        print(f"DEBUG: verify_token - User {uid} NOT found in Firestore.")
+                        g.user = {'uid': uid, 'role': 'GUEST'}
+                else:
+                    print(f"DEBUG: verify_token - User {uid} NOT found in Firestore.")
+                    g.user = {'uid': uid, 'role': 'GUEST'}
                 
             return f(*args, **kwargs)
         except Exception as e:
@@ -149,21 +161,52 @@ def sync_user():
     doc = user_ref.get()
     
     if not doc.exists:
-        # Create new user
-        print(f"DEBUG: sync_user - Creating new user for {uid}")
-        new_user = {
-            'email': request.json.get('email', ''), # Frontend should send this or we extract from token if possible
-            'displayName': request.json.get('displayName', ''),
-            'role': 'PATIENT', # Default role
-            'createdAt': firestore.SERVER_TIMESTAMP
-        }
-        # In a real scenario, extracting email/name from decoded_token is safer if token passed details
-        # For now, we trust the sync payload or token
+        req_json = request.get_json(silent=True) or {}
+        email = req_json.get('email', '')
         
-        user_ref.set(new_user)
-        return jsonify({'message': 'User created', 'role': 'PATIENT'})
+        # Check if the admin previously created a user with this email
+        existing_users = db.collection('users').where('email', '==', email).limit(1).get()
+        
+        if existing_users:
+            print(f"DEBUG: sync_user - Found existing user by email. Migrating old record to new Google UID {uid}")
+            old_doc = existing_users[0]
+            old_data = old_doc.to_dict()
+            
+            # Transfer old data to new UID doc
+            user_ref.set(old_data)
+            
+            # Clean up old orphaned record created by Admin
+            old_doc.reference.delete()
+            
+            # Need to update diagnoses that pointed to old UID
+            try:
+                 old_uid = old_doc.id
+                 diagnoses_ref = db.collection('diagnoses').where('patientId', '==', old_uid).stream()
+                 for d in diagnoses_ref:
+                      d.reference.update({'patientId': uid})
+                 print(f"DEBUG: Migrated diagnoses to new UID {uid}")
+            except Exception as e:
+                 print(f"Error migrating diagnoses: {e}")
+                 
+            return jsonify({'message': 'User synced and migrated', 'role': old_data.get('role')})
+            
+        else:
+            # Create completely new user
+            print(f"DEBUG: sync_user - Creating new user for {uid}")
+            new_user = {
+                'email': email,
+                'displayName': req_json.get('displayName', ''),
+                'role': 'PATIENT', # Default role
+                'createdAt': firestore.SERVER_TIMESTAMP
+            }
+            user_ref.set(new_user)
+            return jsonify({'message': 'User created', 'role': 'PATIENT'})
     else:
         current_role = user_data.get('role')
+        if current_role == 'GUEST' and 'original_uid' in user_data:
+             # Just in case fallback didn't catch properly in verify
+             current_role = user_data.get('role', 'PATIENT')
+             
         print(f"DEBUG: sync_user - User exists. Returning role: {current_role}")
         return jsonify({'message': 'User synced', 'role': current_role})
 
@@ -197,23 +240,191 @@ def list_users():
         
     return jsonify(users)
 
-@app.route('/api/admin/users/<uid>/role', methods=['PUT'])
+@app.route('/api/admin/users', methods=['POST'])
 @verify_token
 @role_required(['SUPER_ADMIN'])
-def update_user_role(uid):
-    """Update a user's role."""
-    new_role = request.json.get('role')
+def create_user():
+    """Create a new user in Firebase Auth and Firestore."""
+    data = request.json
+    email = data.get('email')
+    display_name = data.get('displayName', '')
+    role = data.get('role', 'PATIENT')
+    
+    ALLOWED_ROLES = ['SUPER_ADMIN', 'DOCTOR', 'ASSISTANT', 'PATIENT']
+    if role not in ALLOWED_ROLES:
+        return jsonify({'error': 'Invalid role', 'allowed': ALLOWED_ROLES}), 400
+
+    if not email:
+        return jsonify({'error': 'Email is required'}), 400
+
+    try:
+        # Create user in Firebase Auth (No password required; allows linking by email later)
+        user_record = auth.create_user(
+            email=email,
+            display_name=display_name
+        )
+        
+        # Save user role in Firestore
+        db.collection('users').document(user_record.uid).set({
+            'email': email,
+            'displayName': display_name,
+            'role': role,
+            'createdAt': firestore.SERVER_TIMESTAMP
+        })
+        
+        return jsonify({'message': f'User created successfully', 'uid': user_record.uid}), 201
+
+    except Exception as e:
+        print(f"Error creating user: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/users/<uid>', methods=['PUT'])
+@verify_token
+@role_required(['SUPER_ADMIN'])
+def update_user(uid):
+    """Update a user's role and/or display name."""
+    data = request.json
+    new_role = data.get('role')
+    new_display_name = data.get('displayName')
+    
     ALLOWED_ROLES = ['SUPER_ADMIN', 'DOCTOR', 'ASSISTANT', 'PATIENT']
     
-    if new_role not in ALLOWED_ROLES:
-        return jsonify({'error': 'Invalid role', 'allowed': ALLOWED_ROLES}), 400
-        
     user_ref = db.collection('users').document(uid)
     if not user_ref.get().exists:
-        return jsonify({'error': 'User not found'}), 404
+        return jsonify({'error': 'User not found in Firestore'}), 404
         
-    user_ref.update({'role': new_role})
-    return jsonify({'message': f'User role updated to {new_role}'})
+    update_data = {}
+    if new_role:
+        if new_role not in ALLOWED_ROLES:
+            return jsonify({'error': 'Invalid role', 'allowed': ALLOWED_ROLES}), 400
+        update_data['role'] = new_role
+        
+    if new_display_name is not None:
+        update_data['displayName'] = new_display_name
+        try:
+             auth.update_user(uid, display_name=new_display_name)
+        except Exception as e:
+             print(f"Error updating display name in auth: {e}")
+             return jsonify({'error': str(e)}), 500
+
+    if update_data:
+        user_ref.update(update_data)
+        
+    return jsonify({'message': f'User updated successfully'})
+
+@app.route('/api/admin/users/<uid>', methods=['DELETE'])
+@verify_token
+@role_required(['SUPER_ADMIN'])
+def delete_user(uid):
+    """Delete a user from Firebase Auth and Firestore."""
+    try:
+        # Delete from Firebase Auth
+        auth.delete_user(uid)
+        
+        # Delete from Firestore
+        db.collection('users').document(uid).delete()
+        
+        return jsonify({'message': 'User deleted successfully'})
+    except Exception as e:
+        print(f"Error deleting user: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# --- Medical Diagnoses Endpoints ---
+
+@app.route('/api/diagnoses', methods=['POST'])
+@verify_token
+@role_required(['SUPER_ADMIN', 'DOCTOR'])
+def create_diagnosis():
+    """Create a new medical diagnosis for a patient."""
+    data = request.json
+    patient_uid = data.get('patientId')
+    symptoms = data.get('symptoms')
+    diagnosis_text = data.get('diagnosis')
+    prescription = data.get('prescription')
+    
+    if not all([patient_uid, symptoms, diagnosis_text]):
+        return jsonify({'error': 'Missing required fields (patientId, symptoms, diagnosis)'}), 400
+        
+    try:
+        # Verify the patient actually exists
+        patient_ref = db.collection('users').document(patient_uid)
+        patient_doc = patient_ref.get()
+        if not patient_doc.exists:
+             return jsonify({'error': 'Patient not found'}), 404
+             
+        # Add to the new "diagnoses" collection
+        new_diagnosis = {
+            'patientId': patient_uid,
+            'doctorId': g.user['uid'],
+            'doctorName': g.user.get('displayName', 'Unknown Doctor'),
+            'symptoms': symptoms,
+            'diagnosis': diagnosis_text,
+            'prescription': prescription or '',
+            'createdAt': firestore.SERVER_TIMESTAMP
+        }
+        
+        _, doc_ref = db.collection('diagnoses').add(new_diagnosis)
+        return jsonify({'message': 'Diagnosis created successfully', 'id': doc_ref.id}), 201
+        
+    except Exception as e:
+        print(f"Error creating diagnosis: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/diagnoses/patient/<patient_uid>', methods=['GET'])
+@verify_token
+def get_patient_diagnoses(patient_uid):
+    """Get all diagnoses for a specific patient.
+    Accessible by:
+    - The actual patient
+    - Any DOCTOR
+    - Any SUPER_ADMIN
+    """
+    user_role = g.user.get('role')
+    user_uid = g.user['uid']
+    
+    # Check permissions logic
+    if user_role == 'PATIENT' and user_uid != patient_uid:
+        return jsonify({'error': 'Forbidden', 'message': 'You can only view your own history.'}), 403
+        
+    if user_role not in ['SUPER_ADMIN', 'DOCTOR', 'PATIENT']:
+         return jsonify({'error': 'Forbidden', 'message': 'Insufficient Permissions'}), 403
+
+    try:
+        diagnoses_ref = db.collection('diagnoses').where('patientId', '==', patient_uid).order_by('createdAt', direction=firestore.Query.DESCENDING)
+        docs = diagnoses_ref.stream()
+        
+        diagnoses = []
+        for doc in docs:
+            item = doc.to_dict()
+            item['id'] = doc.id
+            diagnoses.append(item)
+            
+        return jsonify(diagnoses), 200
+        
+    except Exception as e:
+        print(f"Error retrieving diagnoses: {e}")
+        return jsonify({'error': str(e)}), 500
+        
+@app.route('/api/doctors/patients', methods=['GET'])
+@verify_token
+@role_required(['SUPER_ADMIN', 'DOCTOR', 'ASSISTANT'])
+def list_patients():
+    """Returns a list of all users with PATIENT role."""
+    try:
+        users_ref = db.collection('users').where('role', '==', 'PATIENT')
+        docs = users_ref.stream()
+        
+        patients = []
+        for doc in docs:
+            user = doc.to_dict()
+            user['uid'] = doc.id
+            patients.append(user)
+            
+        return jsonify(patients), 200
+    except Exception as e:
+         print(f"Error listing patients: {e}")
+         return jsonify({'error': str(e)}), 500
 
 
 if __name__ == '__main__':
